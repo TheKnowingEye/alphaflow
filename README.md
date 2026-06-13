@@ -1,5 +1,7 @@
 # AlphaFlow Engine
 
+[![CI](https://github.com/TheKnowingEye/alphaflow/actions/workflows/ci.yml/badge.svg)](https://github.com/TheKnowingEye/alphaflow/actions/workflows/ci.yml)
+
 A global, multi-factor **quantitative research pipeline** — data ingestion → feature
 engineering → ML model → trade signals → walk-forward backtest — across US and Indian
 equities, 6 sectors, in async Python.
