@@ -52,28 +52,60 @@ def _metrics(ret: pd.Series, periods: int = 252) -> dict[str, float]:
     }
 
 
-def backtest_sector(prices: pd.DataFrame, benchmark: str, stocks: list[str]) -> dict:
+def backtest_sector(
+    prices: pd.DataFrame,
+    benchmark: str,
+    stocks: list[str],
+    lookback: int = LOOKBACK,
+    hold: int = 1,
+    direction_filter: bool = False,
+    train_frac: float = TRAIN_FRAC,
+) -> dict:
     """Relative-strength reversal across a sector's stocks. Returns OOS metrics +
-    a buy-and-hold baseline for the same names/period."""
+    a buy-and-hold baseline for the same names/period.
+
+    lookback         days of relative under/out-performance the signal reads
+    hold             rebalance every `hold` days (>1 cuts turnover/cost)
+    direction_filter trade only names that LAG the benchmark in the in-sample half
+                     (sign learned on train data only -> still leak-free)
+    """
     cols = [c for c in stocks if c in prices.columns] + [benchmark]
     px = prices[cols].dropna()
     r = log_returns(px).dropna()
-    names = [c for c in stocks if c in px.columns]
     bench = r[benchmark]
+    names = [c for c in stocks if c in px.columns]
 
-    rel = r[names].sub(bench, axis=0)  # daily relative return
-    spread = rel.rolling(LOOKBACK).sum()  # under/out-performance window
+    if direction_filter:
+        tr = r.iloc[: int(len(r) * train_frac)]
+        names = [n for n in names if verdict(lead_lag_corr(tr[n], tr[benchmark])) == "LAGS"]
+    if len(names) < 2:
+        return {
+            "n_oos": 0,
+            "strategy": _metrics(pd.Series(dtype=float)),
+            "baseline": _metrics(pd.Series(dtype=float)),
+            "avg_daily_turnover": 0.0,
+            "n_names": len(names),
+        }
+
+    rel = r[names].sub(bench, axis=0)
+    spread = rel.rolling(lookback).sum()
     z = (spread - spread.rolling(Z_WINDOW).mean()) / spread.rolling(Z_WINDOW).std()
-    pos = (-np.sign(z)).shift(1).fillna(0.0)  # long laggards; decided at t-1
+    target = (-np.sign(z)).shift(1).fillna(0.0)  # long laggards; decided at t-1
+    # hold the decision for `hold` days (rebalance only every `hold`-th row)
+    m = (np.arange(len(target)) % hold) == 0
+    pos = target.copy()
+    pos[~m] = np.nan
+    pos = pos.ffill().fillna(0.0)
 
-    strat = (pos * r[names]).mean(axis=1)  # equal-weight book
+    strat = (pos * r[names]).mean(axis=1)
     turn = pos.diff().abs().mean(axis=1).fillna(0.0)
     net = strat - turn * COST_PER_SIDE
-    baseline = r[names].mean(axis=1)  # equal-weight buy & hold
+    baseline = r[names].mean(axis=1)
 
-    cut = int(len(net) * TRAIN_FRAC)
+    cut = int(len(net) * train_frac)
     return {
         "n_oos": len(net) - cut,
+        "n_names": len(names),
         "strategy": _metrics(net.iloc[cut:]),
         "baseline": _metrics(baseline.iloc[cut:]),
         "avg_daily_turnover": float(turn.iloc[cut:].mean()),
