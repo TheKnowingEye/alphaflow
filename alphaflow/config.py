@@ -145,6 +145,12 @@ class Settings(BaseModel):
     frac_diff_d: float = 0.5
     frac_diff_width: int = 50
 
+    # Robustness caps (bite only pathological live values; synthetic stays well inside).
+    # EWMA var(macro) can momentarily collapse -> beta explodes -> residual target blows
+    # up. Clip beta to a plausible equity range and cap |3d residual alpha|.
+    beta_clip: float = 4.0
+    target_clip: float = 0.05  # max |fwd_alpha_3d| (3-day residual, log-return units)
+
     # CatBoost
     iterations: int = 400
     learning_rate: float = 0.05

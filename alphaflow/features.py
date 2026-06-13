@@ -202,8 +202,16 @@ async def _holding_rows(
         fund = pit_lookup(frecs, d)
         if fund is None or k0 not in fund.metrics or k1 not in fund.metrics:
             continue  # no PIT fundamental yet -> no fabrication
+        # Robustness: clamp beta (var(macro) can momentarily collapse -> blowup) and the
+        # residual target (else outlier labels train fantasy alphas + detonate the backtest).
+        bc = settings.beta_clip
+        beta = max(-bc, min(bc, beta))
         fa, fm = rec["fwd_a"], rec["fwd_m"]
-        fwd_alpha = None if (fa is None or fm is None) else fa - beta * fm
+        if fa is None or fm is None:
+            fwd_alpha = None
+        else:
+            tc = settings.target_clip
+            fwd_alpha = max(-tc, min(tc, fa - beta * fm))
         rows.append(
             FeatureRow(
                 ticker=holding.ticker,

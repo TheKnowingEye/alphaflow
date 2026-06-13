@@ -68,3 +68,10 @@ Running log of architecture changes + debugging edge cases.
 - `PriceBar.ticker`/`Signal.asset_ticker`/`FundamentalRecord.ticker` max_length 12 -> 20: `ULTRACEMCO.NS` (13) blew the 12-char cap. NSE symbols + `.NS` suffix run long.
 - Coverage logging in `_load_features`: empty-price tickers + holdings producing 0 rows + rows-per-cell. Live grid will show real coverage (some IN tickers/indices may be empty -> per-ticker fetch degrades, holding drops, no crash).
 - Recommendation stands: KEEP POOLED. Depth alone doesn't justify per-sector; also need trigger #2 (sector_id dominates SHAP / per-sector RMSE diverges). Pooled borrows strength + 1 model to operate.
+
+## 2026-06-14 — Live blowup: beta + target clipping
+- First LIVE grid backtest: Sharpe +5.03, total_return +6.4e10 (64 billion x). NOT edge — outlier contamination. Tell-tale: synthetic clean, live detonates.
+- Root cause: `fwd_alpha = fwd_a - beta*fwd_m`. EWMA `var(macro)` momentarily collapses -> beta explodes (->50+) -> residual target hits ±200%. Those labels (a) train ±15% fantasy alphas (signals.json), (b) feed backtest as realized return -> `cumprod(1+net)` detonates.
+- Fix: `beta_clip=4.0` (plausible equity beta) + `target_clip=0.05` (|3d residual| cap) in features._holding_rows, before FeatureRow + before backtest reads `fwd_alpha_3d`. Single source -> bounds both training labels and backtest PnL.
+- Clips set generous so synthetic (beta~1, alpha~0.02) never hits them -> pandas cross-checks unchanged, 47 tests green.
+- Open issues (NOT yet fixed, flagged to user): buy/sell thresholds (±0.004) << live val RMSE (~0.03) -> over-trading (6691 trades); live fundamentals = single backdated snapshot (degraded PIT) -> fund_0/1 ~constant. Post-clip Sharpe expected ~0 = honest "no demonstrated edge"; this is a research scaffold, not a profitable strategy.
