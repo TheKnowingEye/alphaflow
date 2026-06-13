@@ -1,0 +1,11 @@
+pydantic>=2.7
+aiosqlite>=0.20
+catboost>=1.2
+arch>=7.0
+pandas>=2.2
+numpy>=1.26
+yfinance>=0.2.40
+pytest>=8.0
+pytest-asyncio>=0.23
+black>=24.0
+flake8>=7.0

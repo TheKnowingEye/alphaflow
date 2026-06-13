@@ -1,0 +1,28 @@
+# Virtual env
+venv/
+.venv/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Generated artifacts
+*.db
+signals.json
+backtest_metrics.json
+catboost_info/
+*.out
+
+# Agent tooling
+.agents/
+.claude/
+skills-lock.json
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
