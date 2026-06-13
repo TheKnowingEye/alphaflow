@@ -1,8 +1,99 @@
-"""Pipeline configuration."""
+"""Pipeline configuration + dual-region multi-factor sector registry."""
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import BaseModel, Field
+
+# --- Global Multi-Factor Registry ------------------------------------------------
+# REGION -> SECTOR -> {macro_benchmark, sector_benchmark, fundamental_keys}.
+# Macro is denormalised onto every sector entry (per the registry contract).
+
+SECTORS: tuple[str, ...] = ("Tech", "Finance", "Energy", "Materials", "FMCG", "Pharma")
+
+# Heterogeneous fundamental keys per sector (yfinance .info keys). Two slots each ->
+# fixed-width matrix even though semantics differ across sectors.
+_FUNDAMENTAL_KEYS: dict[str, tuple[str, str]] = {
+    "Tech": ("trailingPE", "revenueGrowth"),
+    "Finance": ("priceToBook", "trailingPE"),
+    "Energy": ("enterpriseToEbitda", "trailingPE"),
+    "Materials": ("priceToBook", "trailingPE"),
+    "FMCG": ("trailingPE", "profitMargins"),
+    "Pharma": ("trailingPE", "revenueGrowth"),
+}
+
+_MACRO: dict[str, str] = {"US": "SPY", "IN": "^NSEI"}
+
+_SECTOR_BENCH: dict[str, dict[str, str]] = {
+    "US": {
+        "Tech": "XLK",
+        "Finance": "XLF",
+        "Energy": "XLE",
+        "Materials": "XLB",
+        "FMCG": "XLP",
+        "Pharma": "XLV",
+    },
+    "IN": {
+        "Tech": "^CNXIT",
+        "Finance": "^NSEBANK",
+        "Energy": "^CNXENERGY",
+        "Materials": "^CNXMETAL",
+        "FMCG": "^CNXFMCG",
+        "Pharma": "^CNXPHARMA",
+    },
+}
+
+GLOBAL_REGISTRY: dict[str, dict[str, dict[str, object]]] = {
+    region: {
+        sector: {
+            "macro_benchmark": _MACRO[region],
+            "sector_benchmark": _SECTOR_BENCH[region][sector],
+            "fundamental_keys": _FUNDAMENTAL_KEYS[sector],
+        }
+        for sector in SECTORS
+    }
+    for region in ("US", "IN")
+}
+
+# Integer codes for the CatBoost matrix (region/sector enter as numeric features).
+REGION_ID: dict[str, int] = {"US": 0, "IN": 1}
+SECTOR_ID: dict[str, int] = {s: i for i, s in enumerate(SECTORS)}
+
+
+@dataclass(frozen=True)
+class Holding:
+    """A resolved (ticker, sector) mapped to its region + benchmarks + fund keys."""
+
+    ticker: str
+    sector: str
+    region: str
+    macro_benchmark: str
+    sector_benchmark: str
+    fundamental_keys: tuple[str, str]
+
+
+def detect_region(ticker: str) -> str:
+    """Auto-router: .NS/.BO suffix -> India, else US."""
+    return "IN" if ticker.upper().endswith((".NS", ".BO")) else "US"
+
+
+def resolve_holding(ticker: str, sector: str) -> Holding:
+    """Map (ticker, sector) -> Holding via the registry; region auto-detected."""
+    region = detect_region(ticker)
+    if sector not in GLOBAL_REGISTRY[region]:
+        raise ValueError(f"unknown sector {sector!r} for region {region!r}")
+    entry = GLOBAL_REGISTRY[region][sector]
+    return Holding(
+        ticker=ticker,
+        sector=sector,
+        region=region,
+        macro_benchmark=str(entry["macro_benchmark"]),
+        sector_benchmark=str(entry["sector_benchmark"]),
+        fundamental_keys=tuple(entry["fundamental_keys"]),  # type: ignore[arg-type]
+    )
+
+
+# --- Pipeline settings -----------------------------------------------------------
 
 
 class Settings(BaseModel):
@@ -10,8 +101,8 @@ class Settings(BaseModel):
 
     model_config = {"frozen": True}
 
-    asset_tickers: tuple[str, ...] = ("NVDA", "AMD")  # leading indicators
-    benchmark_ticker: str = "MAHKTECH.NS"  # Mirae Asset Hang Seng TECH ETF (lagging vector)
+    # Universe: list of (ticker, sector). Region auto-detected per ticker.
+    universe: tuple[tuple[str, str], ...] = (("NVDA", "Tech"), ("AMD", "Tech"))
     db_path: Path = Path("alphaflow.db")
     history_days: int = 730
     synthetic_seed: int = 42
@@ -51,6 +142,9 @@ class Settings(BaseModel):
     bt_retrain_every: int = 5  # retrain CatBoost every N rebalances
     bt_iterations: int = 150
     metrics_path: Path = Path("backtest_metrics.json")
+
+    def holdings(self) -> tuple[Holding, ...]:
+        return tuple(resolve_holding(t, s) for t, s in self.universe)
 
 
 SETTINGS = Settings()

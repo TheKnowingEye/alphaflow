@@ -14,6 +14,7 @@ def build_signals(
     predictions: dict[str, tuple[date, float]],
     settings: Settings,
     calibrator: ConformalCalibrator,
+    benchmark: str = "GLOBAL",
 ) -> SignalBatch:
     """BUY/SELL on alpha thresholds; softmax allocation over BUY alphas only.
 
@@ -58,7 +59,7 @@ def build_signals(
     return SignalBatch(
         model_version=__version__,
         generated_at=now,
-        benchmark=settings.benchmark_ticker,
+        benchmark=benchmark,
         signals=signals,
     )
 

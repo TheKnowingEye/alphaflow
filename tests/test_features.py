@@ -1,83 +1,79 @@
-"""Cross-check SQL window-function features against independent pandas calc."""
+"""Cross-check multi-factor SQL/Python features against an independent pandas calc."""
 
 import numpy as np
 import pandas as pd
 import pytest
 from arch import arch_model
 
-from alphaflow.config import Settings
-from alphaflow.data_source import synthetic_history
+from alphaflow.config import Settings, resolve_holding
+from alphaflow.data_source import synthetic_prices
 from alphaflow.features import _GARCH_SCALE, compute_features, ffd_weights
+from alphaflow.fundamentals import pit_lookup, synthetic_fundamentals
 from alphaflow.ingestion import ingest_bars, open_db
 
 SETTINGS = Settings(db_path=":memory:")
+H = resolve_holding("NVDA", "Tech")  # US -> macro SPY, sector XLK
+TICKERS = ("NVDA", "SPY", "XLK")
 
 
 @pytest.fixture
-async def feature_rows():
+async def built():
     conn = await open_db(":memory:")
-    history = synthetic_history(
-        SETTINGS.asset_tickers, SETTINGS.benchmark_ticker, days=400, seed=11
-    )
-    for bars in history.values():
+    prices = synthetic_prices(TICKERS, days=400, seed=11, low_idio=frozenset({"SPY", "XLK"}))
+    for bars in prices.values():
         await ingest_bars(conn, bars)
-    rows = await compute_features(conn, SETTINGS)
+    funds = synthetic_fundamentals((H,), days=SETTINGS.history_days, seed=SETTINGS.synthetic_seed)
+    rows = await compute_features(conn, SETTINGS, holdings=(H,), fundamentals=funds)
     await conn.close()
-    return history, rows
+    return prices, funds, rows
 
 
-def _pandas_features(history, ticker):
-    a = pd.Series({b.bar_date: b.close for b in history[ticker]}, dtype=float).sort_index()
-    e = pd.Series(
-        {b.bar_date: b.close for b in history[SETTINGS.benchmark_ticker]}, dtype=float
-    ).sort_index()
-    # Lead-lag: HK benchmark lags US by one session -> leader day t pairs with the
-    # HK close from t-1. Mirrors the SQL LEAD(bar_date) map join.
-    df = pd.DataFrame({"a": a, "e_raw": e})
-    df["e"] = df["e_raw"].shift(1)
-    df = df.dropna(subset=["a", "e"])
+def _pandas(prices):
+    cl = {
+        t: pd.Series({b.bar_date: b.close for b in prices[t]}, dtype=float).sort_index()
+        for t in TICKERS
+    }
+    df = pd.DataFrame({"a": cl["NVDA"], "m_raw": cl["SPY"], "s_raw": cl["XLK"]})
+    df["m"] = df["m_raw"].shift(1)  # benchmarks lag one session
+    df["s"] = df["s_raw"].shift(1)
+    df = df.dropna(subset=["a", "m", "s"])
     df["a_ret"] = np.log(df.a / df.a.shift(1))
-    df["e_ret"] = np.log(df.e / df.e.shift(1))
-    df["spread"] = np.log(df.a) - np.log(df.e)
-    # population std (ddof=0) — matches SQL AVG(x*x) - AVG(x)^2 identity
-    mu = df.spread.rolling(20).mean()
-    sd = df.spread.rolling(20).std(ddof=0)
-    df["spread_z"] = (df.spread - mu) / sd
-    # Fractional differentiation of log price (mirrors features._frac_diff).
+    df["m_ret"] = np.log(df.m / df.m.shift(1))
+    df["macro_spread"] = np.log(df.a) - np.log(df.m)
+    df["sector_spread"] = np.log(df.a) - np.log(df.s)
+    mu = df.sector_spread.rolling(20).mean()
+    sd = df.sector_spread.rolling(20).std(ddof=0)
+    df["spread_z"] = (df.sector_spread - mu) / sd
     wts = ffd_weights(SETTINGS.frac_diff_d, SETTINGS.frac_diff_width)
     logp = np.log(df.a.to_numpy())
-    width = SETTINGS.frac_diff_width
+    w = SETTINGS.frac_diff_width
     fd = [np.nan] * len(logp)
-    for i in range(width - 1, len(logp)):
-        fd[i] = sum(wts[k] * logp[i - k] for k in range(width))
+    for i in range(w - 1, len(logp)):
+        fd[i] = sum(wts[k] * logp[i - k] for k in range(w))
     df["frac_diff_close"] = fd
-    for w in (5, 10, 20):
-        df[f"mom_{w}d"] = df.a_ret.rolling(w).sum()
-    # EWMA beta (adjust=False recurrence) — mirrors features._ewma_beta. span = beta_window.
+    for win in (5, 10, 20):
+        df[f"mom_{win}d"] = df.a_ret.rolling(win).sum()
     al = 2.0 / (SETTINGS.beta_window + 1)
     ea = df.a_ret.ewm(alpha=al, adjust=False).mean()
-    ee = df.e_ret.ewm(alpha=al, adjust=False).mean()
-    eae = (df.a_ret * df.e_ret).ewm(alpha=al, adjust=False).mean()
-    eee = (df.e_ret**2).ewm(alpha=al, adjust=False).mean()
-    df["beta_60d"] = (eae - ea * ee) / (eee - ee * ee)
-    fwd_a = np.log(df.a.shift(-3) / df.a)
-    fwd_e = np.log(df.e.shift(-3) / df.e)
-    df["fwd_alpha_3d"] = fwd_a - df.beta_60d * fwd_e
+    em = df.m_ret.ewm(alpha=al, adjust=False).mean()
+    eam = (df.a_ret * df.m_ret).ewm(alpha=al, adjust=False).mean()
+    emm = (df.m_ret**2).ewm(alpha=al, adjust=False).mean()
+    df["beta_60d"] = (eam - ea * em) / (emm - em * em)
     return df
 
 
-async def test_sql_matches_pandas(feature_rows):
-    history, rows = feature_rows
-    df = _pandas_features(history, "NVDA")
+async def test_sql_matches_pandas(built):
+    prices, _, rows = built
+    df = _pandas(prices)
     nvda = {r.bar_date: r for r in rows if r.ticker == "NVDA"}
     assert len(nvda) > 100
-
-    checked = 0
     for d, r in nvda.items():
         exp = df.loc[d]
+        assert r.region == "US" and r.sector == "Tech"
+        assert r.region_id == 0 and r.sector_id == 0
         for col in (
-            "log_ret_1d",
-            "spread",
+            "macro_spread",
+            "sector_spread",
             "spread_z",
             "frac_diff_close",
             "mom_5d",
@@ -85,45 +81,36 @@ async def test_sql_matches_pandas(feature_rows):
             "mom_20d",
             "beta_60d",
         ):
-            pd_col = "a_ret" if col == "log_ret_1d" else col
-            assert getattr(r, col) == pytest.approx(
-                exp[pd_col], rel=1e-7, abs=1e-10
-            ), f"{col} mismatch on {d}"
-        if r.fwd_alpha_3d is not None:
-            assert r.fwd_alpha_3d == pytest.approx(exp["fwd_alpha_3d"], rel=1e-7, abs=1e-10)
-        checked += 1
-    assert checked == len(nvda)
+            assert getattr(r, col) == pytest.approx(exp[col], rel=1e-7, abs=1e-10), f"{col}@{d}"
+        assert r.log_ret_1d == pytest.approx(exp["a_ret"], rel=1e-7, abs=1e-10)
 
 
-async def test_garch_vol_matches_independent_refit(feature_rows):
-    history, rows = feature_rows
-    df = _pandas_features(history, "NVDA")
+async def test_garch_vol_matches_refit(built):
+    prices, _, rows = built
+    df = _pandas(prices)
     rets = df.a_ret.dropna().to_numpy() * _GARCH_SCALE
     res = arch_model(rets, mean="Zero", vol="Garch", p=1, q=1, dist="normal").fit(
         disp="off", show_warning=False
     )
-    cond = np.asarray(res.conditional_volatility) / _GARCH_SCALE
-    # align: conditional_volatility aligns to the non-NaN return dates
-    ret_dates = df.a_ret.dropna().index
-    expected = dict(zip(ret_dates, cond))
-
-    nvda = {r.bar_date: r for r in rows if r.ticker == "NVDA"}
-    checked = 0
-    for d, r in nvda.items():
-        assert r.garch_vol > 0
-        assert r.garch_vol == pytest.approx(expected[d], rel=1e-6, abs=1e-12)
-        assert r.garch_vol_ratio > 0  # asset GARCH vol / benchmark GARCH vol
-        checked += 1
-    assert checked == len(nvda)
+    cond = dict(zip(df.a_ret.dropna().index, np.asarray(res.conditional_volatility) / _GARCH_SCALE))
+    for r in (r for r in rows if r.ticker == "NVDA"):
+        assert r.garch_vol > 0 and r.garch_vol_ratio > 0
+        assert r.garch_vol == pytest.approx(cond[r.bar_date], rel=1e-6, abs=1e-12)
 
 
-async def test_warmup_and_forward_edges(feature_rows):
-    history, rows = feature_rows
+async def test_fundamentals_pit_attached(built):
+    _, funds, rows = built
+    frecs = funds["NVDA"]
+    for r in (r for r in rows if r.ticker == "NVDA"):
+        fund = pit_lookup(frecs, r.bar_date)
+        assert r.fund_0 == pytest.approx(fund.metrics["trailingPE"])
+        assert r.fund_1 == pytest.approx(fund.metrics["revenueGrowth"])
+
+
+async def test_warmup_and_forward_edges(built):
+    prices, _, rows = built
     nvda = sorted((r for r in rows if r.ticker == "NVDA"), key=lambda r: r.bar_date)
-    # warmup: first beta_window joined dates excluded. Benchmark-lag join drops the
-    # first asset session (no prior HK close to pair) -> one fewer joined row.
-    n_joined = len(history["NVDA"]) - 1
+    n_joined = len(prices["NVDA"]) - 1  # benchmark-lag drops first asset session
     assert len(nvda) == n_joined - SETTINGS.beta_window
-    # last forward_horizon rows have NULL target (LEAD runs off the end)
     assert all(r.fwd_alpha_3d is None for r in nvda[-3:])
     assert all(r.fwd_alpha_3d is not None for r in nvda[:-3])

@@ -11,7 +11,8 @@ from .models import FeatureRow
 
 FEATURE_COLS = (
     "log_ret_1d",
-    "spread",
+    "macro_spread",
+    "sector_spread",
     "spread_z",
     "frac_diff_close",
     "garch_vol",
@@ -20,8 +21,10 @@ FEATURE_COLS = (
     "mom_10d",
     "mom_20d",
     "beta_60d",
-    "trailing_pe",
-    "rev_growth_quarterly",
+    "region_id",  # multi-factor: region/sector enter as numeric codes
+    "sector_id",
+    "fund_0",  # sector's heterogeneous fundamentals (fixed slots)
+    "fund_1",
 )
 
 

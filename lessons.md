@@ -48,3 +48,16 @@ Running log of architecture changes + debugging edge cases.
 - Live yfinance rev-growth key varies: try `revenueQuarterlyGrowth` then `revenueGrowth`.
 - `compute_features(conn, settings, fundamentals=None)` — default None -> synthetic, so existing test/backtester callers unchanged; main passes fetched (live/synthetic).
 - FEATURE_COLS now 12 (10 technical + 2 fundamental); FeatureRow + validator synced. CatBoost trains on combined matrix, val RMSE ~0.0419, 70 backtest steps intact.
+
+## 2026-06-14 — Global Multi-Factor Engine (US + India, 6 sectors)
+- `GLOBAL_REGISTRY[REGION][SECTOR]={macro_benchmark,sector_benchmark,fundamental_keys}` in config.py (macro denormalised per sector, per contract). Auto-router `detect_region`: `.NS`/`.BO` -> IN else US.
+- **Design decisions / improvements (explained):**
+  - Pooled single model + `region_id`/`sector_id` as NUMERIC features (not CatBoost cat_features / one-hot). Keeps `_matrix` pure-numeric -> backtester + train untouched, fixed-width matrix across the whole grid. Cheaper than per-(region,sector) models.
+  - Heterogeneous fundamentals -> generic `fund_0`/`fund_1` slots (the sector's two keys in order) + raw JSON in DB. Fixed matrix width despite different semantics; CatBoost disambiguates via sector_id.
+  - Per-holding SQL (loop) rather than one giant multi-benchmark query: each holding joins its OWN macro+sector benchmark by `:asset/:macro/:sector` params. Keeps window-function SQL, trivially generalises to N holdings.
+  - Same-region benchmarks are same-session -> the P0 cross-timezone rationale is moot, but kept a 1-session benchmark lag uniformly (cheap, preserves no-lookahead margin + the -1 warmup invariant).
+  - Residual-alpha target now vs the MACRO benchmark (market factor); sector_spread is a relative-strength feature.
+- **DB fluidity**: `fundamentals(ticker, announce_date, payload JSON)`. Bank (priceToBook) + Tech (revenueGrowth) coexist — no column churn. `ingest_fundamentals`/`load_fundamentals` round-trip JSON.
+- **Live PIT bug**: yfinance `get_earnings_dates` returns the NEXT (future) earnings -> single live fundamental stamped in the future -> `pit_lookup` None for every historical row -> 0 features. Fix: backdate the single live snapshot before the window (degraded PIT, flagged). Synthetic = real quarterly PIT.
+- **Verification (NVDA/Tech, JPM/Finance, TCS.NS/Tech, HDFCBANK.NS/Finance)**: synthetic -> 1848 rows, exit 0. LIVE yfinance -> real prices (Indian indices on their own calendar, 726/727 bars, inner-join handles), 2228 rows, NO NaN, train rmse 0.0333, backtest, exit 0.
+- `synthetic_prices`: tickers sharing a region share a macro factor (Random(f"{seed}:macro:{region}")) -> non-degenerate spreads/betas; benchmarks get lower idio vol.

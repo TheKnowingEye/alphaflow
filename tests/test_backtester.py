@@ -3,7 +3,7 @@
 import pytest
 
 from alphaflow.config import Settings
-from alphaflow.data_source import synthetic_history
+from alphaflow.data_source import synthetic_prices
 from alphaflow.features import compute_features
 from alphaflow.ingestion import ingest_bars, open_db
 from execution.backtester import BacktestMetrics, _positions, walk_forward
@@ -16,15 +16,17 @@ SETTINGS = Settings(
     bt_retrain_every=100,
     bt_iterations=20,
 )
+# Universe NVDA/AMD Tech (US) -> macro SPY, sector XLK.
+TICKERS = ("NVDA", "AMD", "SPY", "XLK")
 
 
 @pytest.fixture
 async def rows():
     conn = await open_db(":memory:")
-    history = synthetic_history(SETTINGS.asset_tickers, SETTINGS.benchmark_ticker, days=420, seed=5)
-    for bars in history.values():
+    prices = synthetic_prices(TICKERS, days=420, seed=5, low_idio=frozenset({"SPY", "XLK"}))
+    for bars in prices.values():
         await ingest_bars(conn, bars)
-    out = await compute_features(conn, SETTINGS)
+    out = await compute_features(conn, SETTINGS)  # default holdings + synthetic funds
     await conn.close()
     return out
 

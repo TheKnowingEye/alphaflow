@@ -54,4 +54,4 @@ def test_json_roundtrip(tmp_path):
     # strict models: JSON-mode validation (str dates OK in JSON mode, not Python mode)
     reparsed = SignalBatch.model_validate_json(path.read_text(encoding="utf-8"))
     assert reparsed.signals == batch.signals
-    assert reparsed.benchmark == "MAHKTECH.NS"
+    assert reparsed.benchmark == "GLOBAL"

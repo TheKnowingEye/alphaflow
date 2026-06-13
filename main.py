@@ -1,32 +1,64 @@
-"""AlphaFlow Engine pipeline: ingest -> features -> train -> predict -> signals.
+"""AlphaFlow Engine: global multi-factor pipeline.
 
-`--backtest` runs the walk-forward OOS evaluation instead of emitting live signals.
+ingest (prices + JSON fundamentals) -> features (dual-spread) -> train -> signals.
+`--backtest` runs walk-forward OOS; `--live` pulls yfinance via the auto-router.
 """
 
 import argparse
 import asyncio
 
 from alphaflow.conformal import ConformalCalibrator
-from alphaflow.config import SETTINGS
-from alphaflow.data_source import fetch_history
+from alphaflow.config import SETTINGS, Holding
+from alphaflow.data_source import fetch_prices
 from alphaflow.features import compute_features
 from alphaflow.fundamentals import fetch_fundamentals
-from alphaflow.ingestion import bar_count, ingest_bars, open_db
+from alphaflow.ingestion import (
+    bar_count,
+    ingest_bars,
+    ingest_fundamentals,
+    load_fundamentals,
+    open_db,
+)
 from alphaflow.model import predict_latest, train
 from alphaflow.signals import build_signals, write_signals
 from execution.backtester import walk_forward
 
 
+def _universe_tickers(holdings: tuple[Holding, ...]) -> tuple[tuple[str, ...], frozenset[str]]:
+    assets = [h.ticker for h in holdings]
+    benches: set[str] = set()
+    for h in holdings:
+        benches.add(h.macro_benchmark)
+        benches.add(h.sector_benchmark)
+    tickers = tuple(dict.fromkeys(assets + sorted(benches)))  # assets first, distinct
+    return tickers, frozenset(benches)
+
+
 async def _load_features(conn, s, live: bool):
-    history = await fetch_history(
-        s.asset_tickers, s.benchmark_ticker, s.history_days, s.synthetic_seed, live=live
+    holdings = s.holdings()
+    for h in holdings:
+        print(
+            f"[route] {h.ticker:11s} -> {h.region}/{h.sector} "
+            f"macro={h.macro_benchmark} sector={h.sector_benchmark}"
+        )
+    tickers, benches = _universe_tickers(holdings)
+
+    prices = await fetch_prices(
+        tickers, s.history_days, s.synthetic_seed, live=live, low_idio=benches
     )
-    for ticker, bars in history.items():
-        n = await ingest_bars(conn, bars)
-        print(f"[ingest] {ticker}: {n} bars (total in DB: {await bar_count(conn, ticker)})")
-    funds = await fetch_fundamentals(s.asset_tickers, s.history_days, s.synthetic_seed, live=live)
-    print(f"[fundamentals] {sum(len(v) for v in funds.values())} PIT records")
-    rows = await compute_features(conn, s, fundamentals=funds)
+    for ticker, bars in prices.items():
+        await ingest_bars(conn, bars)
+        print(f"[ingest] {ticker}: {await bar_count(conn, ticker)} bars")
+
+    # Fundamentals -> JSON column -> reload (exercises DB fluidity).
+    funds = await fetch_fundamentals(holdings, s.history_days, s.synthetic_seed, live=live)
+    n_fund = 0
+    for recs in funds.values():
+        n_fund += await ingest_fundamentals(conn, recs)
+    print(f"[fundamentals] {n_fund} PIT records (JSON)")
+    loaded = {h.ticker: await load_fundamentals(conn, h.ticker) for h in holdings}
+
+    rows = await compute_features(conn, s, holdings=holdings, fundamentals=loaded)
     labelled = sum(1 for r in rows if r.fwd_alpha_3d is not None)
     print(f"[features] {len(rows)} rows ({labelled} labelled)")
     return rows
@@ -57,7 +89,6 @@ async def run(live: bool, backtest: bool) -> None:
             f"[model] CatBoost trained: {result.n_train} train / {result.n_val} val "
             f"({result.n_purged} purged), val RMSE = {result.val_rmse:.6f}"
         )
-
         calibrator = ConformalCalibrator(list(result.val_residuals), window=s.conformal_window)
         preds = predict_latest(result.model, rows)
         batch = build_signals(preds, s, calibrator)
@@ -65,7 +96,7 @@ async def run(live: bool, backtest: bool) -> None:
         print(f"[signals] -> {s.signals_path}")
         for sig in batch.signals:
             print(
-                f"  {sig.asset_ticker:8s} {sig.target_action.value:4s} "
+                f"  {sig.asset_ticker:11s} {sig.target_action.value:4s} "
                 f"alpha={sig.predicted_alpha:+.5f} weight={sig.allocation_weight:.4f} "
                 f"conf={sig.model_confidence_score:.3f}"
             )

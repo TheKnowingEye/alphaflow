@@ -1,59 +1,63 @@
 # AlphaFlow Engine — SPEC
 
 ## Core Thesis
-Cross-Asset Lead-Lag and Relative Strength Spread analysis. US hardware leaders
-(NVDA, AMD) are the **leading** indicators; the global tech benchmark — Mirae Asset
-Hang Seng TECH ETF (`MAHKTECH.NS`, sandbox-wrapped synthetic by default) — is the
-**lagging** vector. Edge = leader move not yet priced into the lagging benchmark.
+**Global Multi-Factor** residual-alpha engine across **US + India**, 6 sectors (Tech,
+Finance, Energy, Materials, FMCG, Pharma). Each holding's idiosyncratic move is measured
+vs its regional **macro** benchmark (market factor) and **sector** benchmark (relative
+strength). Edge = predicted 3-day forward residual alpha vs the macro factor.
+
+## Dual-Region Sector Registry (`config.py`)
+`GLOBAL_REGISTRY[REGION][SECTOR] = {macro_benchmark, sector_benchmark, fundamental_keys}`.
+- US macro `SPY`; sectors -> SPDR ETFs (XLK/XLF/XLE/XLB/XLP/XLV).
+- India macro `^NSEI`; sectors -> Nifty indices (^CNXIT/^NSEBANK/^CNXENERGY/^CNXMETAL/
+  ^CNXFMCG/^CNXPHARMA).
+- `fundamental_keys` per sector (e.g. Tech=trailingPE+revenueGrowth, Finance=priceToBook+
+  trailingPE). **Auto-router**: ticker `.NS`/`.BO` -> IN, else US (`resolve_holding`).
 
 ## Goal
-Async FinTech pipeline. Predict **3-day forward residual alpha** of each leader vs the
-benchmark with CatBoost. Emit a Pydantic v2-validated JSON signal payload
-(target_action + allocation_weight + model_confidence_score).
+Predict **3-day forward residual alpha** (vs macro benchmark) per holding with CatBoost.
+Emit a Pydantic v2-validated JSON signal payload (target_action + allocation_weight +
+model_confidence_score).
 
 ## Architecture
 
 ```
 alphaflow/
-  config.py        Pydantic settings (tickers, benchmark, DB path, model params)
-  models.py        Pydantic v2 strict models: PriceBar, FeatureRow, Signal, SignalBatch
-  data_source.py   Market data: yfinance (live) or seeded synthetic GBM (default, offline-safe)
-  fundamentals.py  Quarterly fundamentals + Point-In-Time forward-fill alignment
-  ingestion.py     Async DB ingestion: aiosqlite, validated batch upsert
-  features.py      SQL window-function features + EWMA beta (Python)
+  config.py        Settings + GLOBAL_REGISTRY + auto-router (Holding, resolve_holding)
+  models.py        Pydantic v2 strict models: PriceBar, FundamentalRecord, FeatureRow, Signal
+  data_source.py   Prices: yfinance (live, per-ticker) or synthetic GBM w/ per-region factor
+  fundamentals.py  Heterogeneous fundamentals + Point-In-Time forward-fill alignment
+  ingestion.py     Async DB: price_bars + fundamentals JSON column (schema fluidity)
+  features.py      Per-holding dual-spread SQL + EWMA beta / FFD / GARCH (Python)
   model.py         CatBoost regressor + purged/embargo split: 3d forward residual alpha
   conformal.py     Split-conformal calibrator: distribution-free confidence + intervals
   signals.py       Signal generation: action + softmax allocation + conformal confidence
 execution/
   backtester.py    Walk-forward OOS backtest + friction engine: BacktestMetrics
-main.py            asyncio orchestrator (--backtest for walk-forward eval)
+main.py            asyncio orchestrator (--backtest walk-forward, --live yfinance)
 tests/             pytest suite
 ```
 
 ## Data Flow
-1. **Ingest**: fetch OHLCV bars per ticker -> validate via `PriceBar` -> async upsert into `price_bars` (PK: ticker, date). Idempotent.
-   - **Lead-lag alignment**: US leaders (NVDA/AMD) lead; HK benchmark lags one session.
-     SQL `LEAD(bar_date)` maps each HK close to the next session, so leader day t joins
-     the HK close from t-1. No same-calendar-day US/HK simultaneity (no lookahead); HK
-     reaction to the leader move lands inside the forward target window.
-2. **Features** (SQL `LAG`/`LEAD`/`AVG OVER` window functions over `price_bars`; EWMA beta in Python):
-   - **Asset-to-ETF Price Spread** — `spread`: log(asset_close) - log(etf_close), plus
-     `spread_z`: 20d z-score of spread (relative-strength dislocation)
-   - **Fractional Differentiation** — `frac_diff_close`: FFD of log price (d≈`frac_diff_d`=0.5,
-     fixed width `frac_diff_width`=50). Stationary while retaining long-memory support/
-     resistance. Weights `w[k]=-w[k-1]*(d-k+1)/k` (power-law decay). Python (not windowable).
-   - **GARCH(1,1) Volatility** — `garch_vol`: 1-day-ahead conditional vol forecast (zero-mean
-     GARCH(1,1) via `arch`, `conditional_volatility[t]` = forecast from info ≤ t-1).
-     `garch_vol_ratio`: asset garch_vol / benchmark garch_vol. **Replaces rolling stddev.**
-   - **Momentum Vector** — `mom_5d / mom_10d / mom_20d`: cumulative log returns
-   - **Fundamentals (PIT-aligned)** — `trailing_pe`, `rev_growth_quarterly`: quarterly
-     metrics keyed by announce date, forward-filled onto daily rows from the announcement
-     forward (no lookahead). Synthetic default; `--live` -> yfinance `.info`.
-   - `log_ret_1d`: 1-day log return
-   - `beta_60d`: **EWMA** beta = EWMA cov(asset, etf) / EWMA var(etf), span = `beta_window`,
-     recurrence `S_t=(1-a)S_{t-1}+a*x_t`, a=2/(span+1). Computed in Python over the full
-     per-ticker series (EWMA is recursive) -> dampens noise vs raw rolling cov/var.
-   - **Target** `fwd_alpha_3d` = (asset 3d fwd log ret) - beta_60d * (etf 3d fwd log ret)
+1. **Ingest** (auto-routed per holding): fetch OHLCV for the asset + its macro & sector
+   benchmarks -> `PriceBar` -> upsert `price_bars`. Fundamentals -> JSON `fundamentals`
+   table (heterogeneous keys per sector, no column churn). Idempotent.
+   - **Benchmark lag**: SQL `LEAD(bar_date)` maps each benchmark close to the next session
+     so the asset on day t joins the benchmark from t-1 (no same-session lookahead margin).
+2. **Features** (per-holding SQL window pass + Python layers):
+   - **Dual spreads** — `macro_spread` = log(asset) - log(macro_bench); `sector_spread` =
+     log(asset) - log(sector_bench); `spread_z` = 20d z-score of sector_spread.
+   - **Fractional Differentiation** — `frac_diff_close`: FFD of log price (d≈0.5, width 50);
+     stationary w/ long memory. Weights `w[k]=-w[k-1]*(d-k+1)/k`. Python (not windowable).
+   - **GARCH(1,1) Volatility** — `garch_vol`: 1d-ahead conditional vol (zero-mean GARCH via
+     `arch`). `garch_vol_ratio`: asset / macro-benchmark garch_vol. Replaces rolling stddev.
+   - **Momentum** — `mom_5d / mom_10d / mom_20d`.
+   - **Region/Sector** — `region`/`sector` strings + `region_id`/`sector_id` numeric codes
+     (so one pooled model generalises across the grid).
+   - **Fundamentals (PIT)** — `fund_0`/`fund_1` = the sector's two `fundamental_keys`,
+     forward-filled from announce date (no lookahead). Heterogeneous semantics, fixed slots.
+   - `log_ret_1d`; `beta_60d`: **EWMA** beta vs macro benchmark (recurrence, span=beta_window).
+   - **Target** `fwd_alpha_3d` = (asset 3d fwd log ret) - beta_60d * (macro 3d fwd log ret).
 3. **Train**: CatBoostRegressor (RMSE) on `fwd_alpha_3d`. **Purged + embargo**
    chronological split (`purged_embargo_split`): val = chronological tail; purge the
    `forward_horizon` train rows whose forward labels overlap val; embargo `forward_horizon`

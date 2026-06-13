@@ -1,10 +1,12 @@
-"""Async ingestion layer: validated PriceBars -> SQLite via aiosqlite."""
+"""Async ingestion layer: validated PriceBars + JSON fundamentals -> SQLite."""
 
+import json
+from datetime import date
 from pathlib import Path
 
 import aiosqlite
 
-from .models import PriceBar
+from .models import FundamentalRecord, PriceBar
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS price_bars (
@@ -18,6 +20,15 @@ CREATE TABLE IF NOT EXISTS price_bars (
     PRIMARY KEY (ticker, bar_date)
 );
 CREATE INDEX IF NOT EXISTS idx_bars_date ON price_bars (bar_date);
+
+-- Heterogeneous fundamentals: a JSON payload column keeps the schema fluid so a
+-- Bank (priceToBook) and a Tech name (revenueGrowth) coexist without column churn.
+CREATE TABLE IF NOT EXISTS fundamentals (
+    ticker        TEXT NOT NULL,
+    announce_date TEXT NOT NULL,
+    payload       TEXT NOT NULL,   -- JSON: {metric_key: value}
+    PRIMARY KEY (ticker, announce_date)
+);
 """
 
 _UPSERT = """
@@ -26,6 +37,12 @@ VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (ticker, bar_date) DO UPDATE SET
     open = excluded.open, high = excluded.high, low = excluded.low,
     close = excluded.close, volume = excluded.volume
+"""
+
+_UPSERT_FUND = """
+INSERT INTO fundamentals (ticker, announce_date, payload)
+VALUES (?, ?, ?)
+ON CONFLICT (ticker, announce_date) DO UPDATE SET payload = excluded.payload
 """
 
 
@@ -44,6 +61,33 @@ async def ingest_bars(conn: aiosqlite.Connection, bars: list[PriceBar]) -> int:
     await conn.executemany(_UPSERT, rows)
     await conn.commit()
     return len(rows)
+
+
+async def ingest_fundamentals(conn: aiosqlite.Connection, records: list[FundamentalRecord]) -> int:
+    """Idempotent upsert of fundamentals as JSON payloads. Returns rows written."""
+    rows = [
+        (r.ticker, r.announce_date.isoformat(), json.dumps(r.metrics, sort_keys=True))
+        for r in records
+    ]
+    await conn.executemany(_UPSERT_FUND, rows)
+    await conn.commit()
+    return len(rows)
+
+
+async def load_fundamentals(conn: aiosqlite.Connection, ticker: str) -> list[FundamentalRecord]:
+    """Read PIT records for a ticker from the JSON column, sorted by announce_date."""
+    cur = await conn.execute(
+        "SELECT announce_date, payload FROM fundamentals WHERE ticker = ? ORDER BY announce_date",
+        (ticker,),
+    )
+    return [
+        FundamentalRecord(
+            ticker=ticker,
+            announce_date=date.fromisoformat(ad),
+            metrics=json.loads(payload),
+        )
+        async for ad, payload in cur
+    ]
 
 
 async def bar_count(conn: aiosqlite.Connection, ticker: str | None = None) -> int:

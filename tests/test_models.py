@@ -73,6 +73,6 @@ def test_batch_weight_sum_capped():
         SignalBatch(
             model_version="0.1.0",
             generated_at=datetime.now(timezone.utc),
-            benchmark="MAHKTECH.NS",
+            benchmark="GLOBAL",
             signals=[sig("NVDA", 0.7), sig("AMD", 0.7)],
         )
