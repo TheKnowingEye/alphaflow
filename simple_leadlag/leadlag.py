@@ -52,6 +52,30 @@ def _metrics(ret: pd.Series, periods: int = 252) -> dict[str, float]:
     }
 
 
+def sector_net_series(
+    prices: pd.DataFrame, benchmark: str, stocks: list[str], lookback: int = LOOKBACK, hold: int = 1
+) -> pd.Series:
+    """Full daily net (cost-adjusted) return series of the parameter-free reversal book
+    for one sector. No train/test split, no filter -> the whole slice is a clean test."""
+    cols = [c for c in stocks if c in prices.columns] + [benchmark]
+    px = prices[cols].dropna()
+    if px.shape[1] < 3:
+        return pd.Series(dtype=float)
+    r = log_returns(px).dropna()
+    names = [c for c in stocks if c in px.columns]
+    rel = r[names].sub(r[benchmark], axis=0)
+    spread = rel.rolling(lookback).sum()
+    z = (spread - spread.rolling(Z_WINDOW).mean()) / spread.rolling(Z_WINDOW).std()
+    target = (-np.sign(z)).shift(1).fillna(0.0)
+    m = (np.arange(len(target)) % hold) == 0
+    pos = target.copy()
+    pos[~m] = np.nan
+    pos = pos.ffill().fillna(0.0)
+    strat = (pos * r[names]).mean(axis=1)
+    turn = pos.diff().abs().mean(axis=1).fillna(0.0)
+    return strat - turn * COST_PER_SIDE
+
+
 def backtest_sector(
     prices: pd.DataFrame,
     benchmark: str,
