@@ -2,7 +2,13 @@
 
 import pytest
 
-from alphaflow.config import GLOBAL_REGISTRY, SECTORS, detect_region, resolve_holding
+from alphaflow.config import (
+    GLOBAL_REGISTRY,
+    SECTORS,
+    UNIVERSE_GRID,
+    detect_region,
+    resolve_holding,
+)
 
 
 def test_registry_shape_region_sector_keys():
@@ -52,3 +58,15 @@ def test_resolve_holding_routes_to_correct_benchmarks():
 def test_unknown_sector_rejected():
     with pytest.raises(ValueError, match="unknown sector"):
         resolve_holding("NVDA", "Crypto")
+
+
+def test_universe_grid_is_full_60_cell():
+    assert len(UNIVERSE_GRID) == 60
+    assert len(set(UNIVERSE_GRID)) == 60  # no dupes
+    holdings = [resolve_holding(t, s) for t, s in UNIVERSE_GRID]
+    from collections import Counter
+
+    cells = Counter((h.region, h.sector) for h in holdings)
+    assert set(cells) == {(r, s) for r in ("US", "IN") for s in SECTORS}  # all 12 cells
+    assert all(n == 5 for n in cells.values())  # 5 tickers per cell
+    assert sum(1 for h in holdings if h.region == "IN") == 30  # .NS auto-routed

@@ -6,14 +6,14 @@ ingest (prices + JSON fundamentals) -> features (dual-spread) -> train -> signal
 
 import argparse
 import asyncio
+from collections import Counter
 
 from alphaflow.conformal import ConformalCalibrator
-from alphaflow.config import SETTINGS, Holding
+from alphaflow.config import SETTINGS, UNIVERSE_GRID, Holding, Settings
 from alphaflow.data_source import fetch_prices
 from alphaflow.features import compute_features
 from alphaflow.fundamentals import fetch_fundamentals
 from alphaflow.ingestion import (
-    bar_count,
     ingest_bars,
     ingest_fundamentals,
     load_fundamentals,
@@ -46,9 +46,11 @@ async def _load_features(conn, s, live: bool):
     prices = await fetch_prices(
         tickers, s.history_days, s.synthetic_seed, live=live, low_idio=benches
     )
+    empty = [t for t in tickers if not prices.get(t)]
     for ticker, bars in prices.items():
         await ingest_bars(conn, bars)
-        print(f"[ingest] {ticker}: {await bar_count(conn, ticker)} bars")
+    print(f"[ingest] {len(tickers) - len(empty)}/{len(tickers)} tickers populated", end="")
+    print(f" ({len(empty)} empty: {empty[:6]})" if empty else "")
 
     # Fundamentals -> JSON column -> reload (exercises DB fluidity).
     funds = await fetch_fundamentals(holdings, s.history_days, s.synthetic_seed, live=live)
@@ -61,11 +63,23 @@ async def _load_features(conn, s, live: bool):
     rows = await compute_features(conn, s, holdings=holdings, fundamentals=loaded)
     labelled = sum(1 for r in rows if r.fwd_alpha_3d is not None)
     print(f"[features] {len(rows)} rows ({labelled} labelled)")
+
+    # Coverage: which holdings produced no rows (missing/short benchmark or asset).
+    produced = {r.ticker for r in rows}
+    missing = [h.ticker for h in holdings if h.ticker not in produced]
+    per_cell = Counter((r.region, r.sector) for r in rows)
+    print(
+        f"[coverage] {len(holdings) - len(missing)}/{len(holdings)} holdings produced rows", end=""
+    )
+    print(f"; dropped: {missing[:8]}" if missing else "")
+    if per_cell:
+        cells = " ".join(f"{rg}/{sc}:{n}" for (rg, sc), n in sorted(per_cell.items()))
+        print(f"[coverage] rows per cell -> {cells}")
     return rows
 
 
-async def run(live: bool, backtest: bool) -> None:
-    s = SETTINGS
+async def run(live: bool, backtest: bool, settings: Settings = SETTINGS) -> None:
+    s = settings
     conn = await open_db(s.db_path)
     try:
         rows = await _load_features(conn, s, live)
@@ -108,8 +122,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="AlphaFlow Engine")
     parser.add_argument("--live", action="store_true", help="fetch real data via yfinance")
     parser.add_argument("--backtest", action="store_true", help="run walk-forward OOS backtest")
+    parser.add_argument(
+        "--grid", action="store_true", help="run the full 60-ticker dual-region sector grid"
+    )
     args = parser.parse_args()
-    asyncio.run(run(live=args.live, backtest=args.backtest))
+    settings = SETTINGS.model_copy(update={"universe": UNIVERSE_GRID}) if args.grid else SETTINGS
+    asyncio.run(run(live=args.live, backtest=args.backtest, settings=settings))
 
 
 if __name__ == "__main__":

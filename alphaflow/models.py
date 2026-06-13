@@ -13,7 +13,7 @@ class PriceBar(BaseModel):
 
     model_config = STRICT
 
-    ticker: str = Field(min_length=1, max_length=12)
+    ticker: str = Field(min_length=1, max_length=20)
     bar_date: date
     open: float = Field(gt=0)
     high: float = Field(gt=0)
@@ -42,7 +42,7 @@ class FundamentalRecord(BaseModel):
 
     model_config = STRICT
 
-    ticker: str = Field(min_length=1, max_length=12)
+    ticker: str = Field(min_length=1, max_length=20)
     announce_date: date
     metrics: dict[str, float]
 
@@ -125,7 +125,7 @@ class Signal(BaseModel):
     model_config = STRICT
 
     timestamp: datetime
-    asset_ticker: str = Field(min_length=1, max_length=12)
+    asset_ticker: str = Field(min_length=1, max_length=20)
     target_action: Action
     allocation_weight: float = Field(ge=0.0, le=1.0)
     model_confidence_score: float = Field(ge=0.0, le=1.0)  # conformal empirical CDF

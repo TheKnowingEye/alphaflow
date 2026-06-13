@@ -59,6 +59,33 @@ GLOBAL_REGISTRY: dict[str, dict[str, dict[str, object]]] = {
 REGION_ID: dict[str, int] = {"US": 0, "IN": 1}
 SECTOR_ID: dict[str, int] = {s: i for i, s in enumerate(SECTORS)}
 
+# Curated deep universe: 5 liquid large-caps per sector per region (60 holdings).
+# Static + large-cap only -> clean yfinance coverage, reproducible (no PIT universe-
+# selection leakage). India = NSE large-caps (.NS). Grows per-cell depth toward the
+# ~2000-row threshold that earns a per-sector vs pooled-model decision.
+_US_GRID: dict[str, tuple[str, ...]] = {
+    "Tech": ("NVDA", "AAPL", "MSFT", "AVGO", "AMD"),
+    "Finance": ("JPM", "BAC", "WFC", "GS", "MS"),
+    "Energy": ("XOM", "CVX", "COP", "SLB", "EOG"),
+    "Materials": ("LIN", "SHW", "FCX", "NEM", "APD"),
+    "FMCG": ("PG", "KO", "PEP", "COST", "WMT"),
+    "Pharma": ("JNJ", "PFE", "MRK", "ABBV", "LLY"),
+}
+_IN_GRID: dict[str, tuple[str, ...]] = {
+    "Tech": ("TCS.NS", "INFY.NS", "WIPRO.NS", "HCLTECH.NS", "TECHM.NS"),
+    "Finance": ("HDFCBANK.NS", "ICICIBANK.NS", "SBIN.NS", "KOTAKBANK.NS", "AXISBANK.NS"),
+    "Energy": ("RELIANCE.NS", "ONGC.NS", "NTPC.NS", "POWERGRID.NS", "BPCL.NS"),
+    "Materials": ("TATASTEEL.NS", "JSWSTEEL.NS", "HINDALCO.NS", "ULTRACEMCO.NS", "GRASIM.NS"),
+    "FMCG": ("HINDUNILVR.NS", "ITC.NS", "NESTLEIND.NS", "BRITANNIA.NS", "DABUR.NS"),
+    "Pharma": ("SUNPHARMA.NS", "DRREDDY.NS", "CIPLA.NS", "DIVISLAB.NS", "AUROPHARMA.NS"),
+}
+UNIVERSE_GRID: tuple[tuple[str, str], ...] = tuple(
+    (ticker, sector)
+    for grid in (_US_GRID, _IN_GRID)
+    for sector in SECTORS
+    for ticker in grid[sector]
+)
+
 
 @dataclass(frozen=True)
 class Holding:

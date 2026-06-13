@@ -61,3 +61,10 @@ Running log of architecture changes + debugging edge cases.
 - **Live PIT bug**: yfinance `get_earnings_dates` returns the NEXT (future) earnings -> single live fundamental stamped in the future -> `pit_lookup` None for every historical row -> 0 features. Fix: backdate the single live snapshot before the window (degraded PIT, flagged). Synthetic = real quarterly PIT.
 - **Verification (NVDA/Tech, JPM/Finance, TCS.NS/Tech, HDFCBANK.NS/Finance)**: synthetic -> 1848 rows, exit 0. LIVE yfinance -> real prices (Indian indices on their own calendar, 726/727 bars, inner-join handles), 2228 rows, NO NaN, train rmse 0.0333, backtest, exit 0.
 - `synthetic_prices`: tickers sharing a region share a macro factor (Random(f"{seed}:macro:{region}")) -> non-degenerate spreads/betas; benchmarks get lower idio vol.
+
+## 2026-06-14 — 60-ticker deep grid
+- `UNIVERSE_GRID` (config.py): 5 curated large-caps × 6 sectors × 2 regions = 60 holdings. Static + large-cap only -> clean yfinance, reproducible (no PIT universe-selection leakage). `main.py --grid` swaps `SETTINGS.universe` via `model_copy`. Default universe stays 2-ticker so tests don't need 60-ticker DBs.
+- **Depth reached** (synthetic grid run): each (region,sector) cell = 2310 rows >= 2000 threshold; 27720 rows total, ONE pooled model (22k train, RMSE 0.036), 60/60 holdings, exit 0. Trigger #1 (deep data) now satisfiable -> per-sector decision can be measured, not guessed.
+- `PriceBar.ticker`/`Signal.asset_ticker`/`FundamentalRecord.ticker` max_length 12 -> 20: `ULTRACEMCO.NS` (13) blew the 12-char cap. NSE symbols + `.NS` suffix run long.
+- Coverage logging in `_load_features`: empty-price tickers + holdings producing 0 rows + rows-per-cell. Live grid will show real coverage (some IN tickers/indices may be empty -> per-ticker fetch degrades, holding drops, no crash).
+- Recommendation stands: KEEP POOLED. Depth alone doesn't justify per-sector; also need trigger #2 (sector_id dominates SHAP / per-sector RMSE diverges). Pooled borrows strength + 1 model to operate.
